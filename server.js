@@ -2,16 +2,26 @@
 
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors'); // <-- 1. IMPORT CORS
+const cors = require('cors');
 
 const app = express();
-const port = 3000;
+// Use the PORT environment variable from Render, or 3000 for local development
+const port = process.env.PORT || 3000;
 
 // --- MIDDLEWARE ---
-app.use(cors()); // <-- 2. USE CORS
+app.use(cors());
+// This is needed to parse JSON bodies in POST requests
+app.use(express.json());
 // ------------------
 
-const dbURI = 'mongodb://localhost:27017/creatoros';
+// Use the DATABASE_URL environment variable from Render
+const dbURI = process.env.DATABASE_URL;
+
+// Add a check to ensure the DATABASE_URL is provided
+if (!dbURI) {
+  console.error('Error: DATABASE_URL environment variable not set.');
+  process.exit(1); // Exit the process with an error code
+}
 
 mongoose.connect(dbURI)
   .then(() => console.log('Successfully connected to MongoDB!'))
@@ -26,5 +36,5 @@ app.use('/api/integrations', require('./routes/integrations'));
 app.use('/api/analysis', require('./routes/analysis'));
 
 app.listen(port, () => {
-  console.log(`Server is running at http://localhost:${port}`);
+  console.log(`Server is running on port ${port}`);
 });
