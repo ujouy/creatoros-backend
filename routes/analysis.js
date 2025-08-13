@@ -1,97 +1,214 @@
-// creatoros-backend/routes/analysis.js
-
 const express = require('express');
-const router = express.Router();
 const axios = require('axios');
-const { google } = require('googleapis');
-const { TwitterApi } = require('twitter-api-v2');
-const authMiddleware = require('../middleware/auth');
-const User = require('../models/User');
+const auth = require('../middleware/auth');
 
-// --- CONFIGURATION ---
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const X_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
-const X_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const router = express.Router();
 
-// --- ROUTE: Generate a User's Roadmap ---
-router.get('/generate-roadmap', authMiddleware, async (req, res) => {
+// Generate AI-powered roadmap analysis
+router.get('/generate-roadmap', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(400).json({ msg: 'User not found.' });
-    }
-
-    let promptData = {
-        youtube: null,
-        x: null,
+    const user = req.user;
+    let analysisData = {
+      user: {
+        email: user.email,
+        subscriptionPlan: user.subscriptionPlan,
+        connectedPlatforms: []
+      },
+      platforms: {}
     };
 
-    // 1. Fetch YouTube Data if connected
-    if (user.google && user.google.accessToken) {
-        const oAuth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-        oAuth2Client.setCredentials({ access_token: user.google.accessToken });
-        const youtube = google.youtube({ version: 'v3', auth: oAuth2Client });
-        const channelInfo = await youtube.channels.list({ part: 'snippet,statistics', mine: true });
-        promptData.youtube = channelInfo.data.items[0];
+    // Fetch Google/YouTube data if connected
+    if (user.isGoogleConnected()) {
+      try {
+        // Get YouTube channel data
+        const channelResponse = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+          params: {
+            part: 'snippet,statistics',
+            mine: true
+          },
+          headers: {
+            'Authorization': `Bearer ${user.google.accessToken}`
+          }
+        });
+
+        if (channelResponse.data.items && channelResponse.data.items.length > 0) {
+          const channel = channelResponse.data.items[0];
+          analysisData.platforms.youtube = {
+            channelName: channel.snippet.title,
+            description: channel.snippet.description,
+            subscriberCount: parseInt(channel.statistics.subscriberCount) || 0,
+            videoCount: parseInt(channel.statistics.videoCount) || 0,
+            viewCount: parseInt(channel.statistics.viewCount) || 0,
+            customUrl: channel.snippet.customUrl,
+            publishedAt: channel.snippet.publishedAt
+          };
+          analysisData.user.connectedPlatforms.push('YouTube');
+        }
+      } catch (error) {
+        console.error('YouTube API error:', error.response?.data || error.message);
+        analysisData.platforms.youtube = { error: 'Failed to fetch YouTube data' };
+      }
     }
 
-    // 2. Fetch X Data if connected
-    if (user.x && user.x.accessToken) {
-        const xClient = new TwitterApi(user.x.accessToken);
-        const xUser = await xClient.v2.me({ 'user.fields': ['public_metrics', 'description'] });
-        promptData.x = xUser.data;
+    // Fetch X (Twitter) data if connected
+    if (user.isXConnected()) {
+      try {
+        // Get user's profile with metrics
+        const profileResponse = await axios.get('https://api.twitter.com/2/users/me', {
+          params: {
+            'user.fields': 'public_metrics,description,created_at,verified'
+          },
+          headers: {
+            'Authorization': `Bearer ${user.x.accessToken}`
+          }
+        });
+
+        const profile = profileResponse.data.data;
+        analysisData.platforms.x = {
+          username: profile.username,
+          name: profile.name,
+          description: profile.description,
+          followersCount: profile.public_metrics.followers_count,
+          followingCount: profile.public_metrics.following_count,
+          tweetCount: profile.public_metrics.tweet_count,
+          listedCount: profile.public_metrics.listed_count,
+          verified: profile.verified,
+          createdAt: profile.created_at
+        };
+        analysisData.user.connectedPlatforms.push('X (Twitter)');
+      } catch (error) {
+        console.error('X API error:', error.response?.data || error.message);
+        analysisData.platforms.x = { error: 'Failed to fetch X data' };
+      }
     }
 
-    // 3. Construct a powerful prompt for the Gemini API
-    const prompt = `
-      You are an expert business strategist for online creators. Analyze the following data from the user's connected platforms and generate a concise, actionable growth roadmap.
+    // Check if any platforms are connected
+    if (analysisData.user.connectedPlatforms.length === 0) {
+      return res.status(400).json({
+        error: 'No platforms connected',
+        message: 'Please connect at least one platform (Google/YouTube or X) to generate analysis.'
+      });
+    }
 
-      **YouTube Data:**
-      ${promptData.youtube ? `
-      - Channel Name: ${promptData.youtube.snippet.title}
-      - Channel Description: "${promptData.youtube.snippet.description}"
-      - Subscribers: ${promptData.youtube.statistics.subscriberCount}
-      - Total Videos: ${promptData.youtube.statistics.videoCount}
-      - Total Views: ${promptData.youtube.statistics.viewCount}
-      ` : '- Not Connected'}
+    // Construct detailed prompt for Gemini AI
+    const prompt = buildAnalysisPrompt(analysisData);
 
-      **X Data:**
-      ${promptData.x ? `
-      - Handle: @${promptData.x.username}
-      - Bio: "${promptData.x.description}"
-      - Followers: ${promptData.x.public_metrics.followers_count}
-      - Following: ${promptData.x.public_metrics.following_count}
-      - Tweet Count: ${promptData.x.public_metrics.tweet_count}
-      ` : '- Not Connected'}
+    // Call Gemini API
+    const geminiResponse = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      }
+    );
 
-      **Your Task:**
-      Based on all available data, provide a holistic strategic roadmap with three sections:
-      1.  **Cross-Platform Content Strategy:** Suggest how the user can leverage their platforms together. What content works on one but not the other? Suggest 2-3 specific ideas.
-      2.  **Audience Growth Synergy:** How can they use one platform to grow the other? Provide 2 unique strategies.
-      3.  **Unified Monetization Opportunities:** Based on their combined audience and content themes, identify the top 2 most viable digital product or service ideas.
+    const analysis = geminiResponse.data.candidates[0].content.parts[0].text;
 
-      Format your response clearly with markdown headings for each section. If a platform is not connected, acknowledge that and tailor the advice to the available data.
-    `;
-
-    // 4. Call the Gemini API
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
-    const geminiResponse = await axios.post(geminiApiUrl, {
-        contents: [{ parts: [{ text: prompt }] }]
-    });
-    const roadmapText = geminiResponse.data.candidates[0].content.parts[0].text;
-
-    // 5. Send the final roadmap back to the user
     res.json({
-        message: "Roadmap generated successfully!",
-        roadmap: roadmapText
+      success: true,
+      analysis,
+      dataUsed: {
+        platforms: Object.keys(analysisData.platforms),
+        generatedAt: new Date().toISOString()
+      }
     });
 
-  } catch (err) {
-    console.error('Error generating roadmap:', err.message);
-    res.status(500).send('Server Error');
+  } catch (error) {
+    console.error('Analysis generation error:', error);
+    
+    if (error.response?.status === 401) {
+      return res.status(401).json({
+        error: 'API authentication failed',
+        message: 'One or more platform tokens have expired. Please reconnect your accounts.'
+      });
+    }
+
+    res.status(500).json({
+      error: 'Server error',
+      message: 'Failed to generate analysis. Please try again later.'
+    });
   }
 });
+
+// Helper function to build comprehensive analysis prompt
+function buildAnalysisPrompt(data) {
+  let prompt = `As an expert business strategist for content creators, analyze the following data and provide a comprehensive business roadmap and strategy recommendations.\n\n`;
+  
+  prompt += `CREATOR PROFILE:\n`;
+  prompt += `- Email: ${data.user.email}\n`;
+  prompt += `- Current Subscription: ${data.user.subscriptionPlan}\n`;
+  prompt += `- Connected Platforms: ${data.user.connectedPlatforms.join(', ')}\n\n`;
+
+  if (data.platforms.youtube) {
+    prompt += `YOUTUBE CHANNEL DATA:\n`;
+    if (data.platforms.youtube.error) {
+      prompt += `- Error: ${data.platforms.youtube.error}\n`;
+    } else {
+      prompt += `- Channel Name: ${data.platforms.youtube.channelName}\n`;
+      prompt += `- Subscribers: ${data.platforms.youtube.subscriberCount?.toLocaleString() || 'N/A'}\n`;
+      prompt += `- Total Videos: ${data.platforms.youtube.videoCount || 'N/A'}\n`;
+      prompt += `- Total Views: ${data.platforms.youtube.viewCount?.toLocaleString() || 'N/A'}\n`;
+      prompt += `- Channel Started: ${data.platforms.youtube.publishedAt || 'N/A'}\n`;
+      prompt += `- Description: ${data.platforms.youtube.description?.substring(0, 200) || 'N/A'}...\n`;
+    }
+    prompt += '\n';
+  }
+
+  if (data.platforms.x) {
+    prompt += `X (TWITTER) PROFILE DATA:\n`;
+    if (data.platforms.x.error) {
+      prompt += `- Error: ${data.platforms.x.error}\n`;
+    } else {
+      prompt += `- Username: @${data.platforms.x.username}\n`;
+      prompt += `- Display Name: ${data.platforms.x.name}\n`;
+      prompt += `- Followers: ${data.platforms.x.followersCount?.toLocaleString() || 'N/A'}\n`;
+      prompt += `- Following: ${data.platforms.x.followingCount?.toLocaleString() || 'N/A'}\n`;
+      prompt += `- Total Tweets: ${data.platforms.x.tweetCount?.toLocaleString() || 'N/A'}\n`;
+      prompt += `- Account Created: ${data.platforms.x.createdAt || 'N/A'}\n`;
+      prompt += `- Verified: ${data.platforms.x.verified ? 'Yes' : 'No'}\n`;
+      prompt += `- Bio: ${data.platforms.x.description || 'N/A'}\n`;
+    }
+    prompt += '\n';
+  }
+
+  prompt += `ANALYSIS REQUIREMENTS:\n`;
+  prompt += `Please provide a detailed business strategy analysis covering:\n\n`;
+  prompt += `1. CURRENT STATUS ASSESSMENT\n`;
+  prompt += `   - Analyze the creator's current position across platforms\n`;
+  prompt += `   - Identify strengths and growth opportunities\n`;
+  prompt += `   - Calculate engagement rates and performance metrics\n\n`;
+  
+  prompt += `2. CONTENT STRATEGY RECOMMENDATIONS\n`;
+  prompt += `   - Suggest content themes and topics based on current performance\n`;
+  prompt += `   - Recommend optimal posting frequency and timing\n`;
+  prompt += `   - Cross-platform content synergy strategies\n\n`;
+  
+  prompt += `3. AUDIENCE GROWTH TACTICS\n`;
+  prompt += `   - Specific strategies to increase followers/subscribers\n`;
+  prompt += `   - Community building recommendations\n`;
+  prompt += `   - Collaboration opportunities\n\n`;
+  
+  prompt += `4. MONETIZATION ROADMAP\n`;
+  prompt += `   - Revenue stream opportunities based on current metrics\n`;
+  prompt += `   - Pricing strategies for products/services\n`;
+  prompt += `   - Sponsorship and partnership potential\n\n`;
+  
+  prompt += `5. 90-DAY ACTION PLAN\n`;
+  prompt += `   - Week-by-week actionable steps\n`;
+  prompt += `   - Key performance indicators to track\n`;
+  prompt += `   - Milestone goals and success metrics\n\n`;
+  
+  prompt += `Please make the analysis practical, data-driven, and tailored specifically to this creator's current situation and metrics.`;
+
+  return prompt;
+}
 
 module.exports = router;

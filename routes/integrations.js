@@ -1,134 +1,264 @@
-// creatoros-backend/routes/integrations.js
-
 const express = require('express');
-const router = express.Router();
-const { OAuth2Client } = require('google-auth-library');
-const { TwitterApi } = require('twitter-api-v2');
 const jwt = require('jsonwebtoken');
-const authMiddleware = require('../middleware/auth');
+const crypto = require('crypto');
+const axios = require('axios');
+const auth = require('../middleware/auth');
 const User = require('../models/User');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_super_secret_string_12345';
+const router = express.Router();
 
-// =================================================================
-// GOOGLE INTEGRATION
-// =================================================================
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const GOOGLE_REDIRECT_URI = 'https://creatoros-backend.onrender.com/api/integrations/google/callback';
-
-const oAuth2Client = new OAuth2Client(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
-
-router.get('/google', authMiddleware, (req, res) => {
-  const token = req.header('x-auth-token') || req.query.token;
-  const authorizeUrl = oAuth2Client.generateAuthUrl({
-    access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/yt-analytics.readonly'],
-    prompt: 'consent',
-    state: token
-  });
-  res.redirect(authorizeUrl);
-});
-
-router.get('/google/callback', async (req, res) => {
+// Google OAuth initiation
+router.get('/google', auth, (req, res) => {
   try {
-    const { code, state } = req.query;
-    if (!state) return res.status(401).json({ msg: 'State token is missing' });
-    
-    const decoded = jwt.verify(state, JWT_SECRET);
-    const userId = decoded.user.id;
-    
-    const { tokens } = await oAuth2Client.getToken(code);
-    
-    await User.findByIdAndUpdate(userId, {
-      'google.accessToken': tokens.access_token,
-      'google.refreshToken': tokens.refresh_token,
-      'google.expiryDate': tokens.expiry_date,
+    // Create state token with user ID
+    const state = jwt.sign(
+      { userId: req.user._id, platform: 'google' },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' }
+    );
+
+    const googleAuthUrl = 'https://accounts.google.com/o/oauth2/v2/auth?' +
+      `client_id=${process.env.GOOGLE_CLIENT_ID}&` +
+      'redirect_uri=' + encodeURIComponent(process.env.GOOGLE_REDIRECT_URI) + '&' +
+      'response_type=code&' +
+      'scope=' + encodeURIComponent('openid profile email https://www.googleapis.com/auth/youtube.readonly') + '&' +
+      'access_type=offline&' +
+      'prompt=consent&' +
+      `state=${state}`;
+
+    res.json({
+      success: true,
+      authUrl: googleAuthUrl
     });
-    
-    res.redirect('https://creatoros-frontend.vercel.app/app/dashboard');
-  } catch (err) {
-    console.error('Error during Google OAuth callback:', err);
-    res.status(500).send('Server Error');
+
+  } catch (error) {
+    console.error('Google OAuth initiation error:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Failed to initiate Google authentication.' 
+    });
   }
 });
 
+// Google OAuth callback
+router.post('/google/callback', async (req, res) => {
+  try {
+    const { code, state } = req.body;
 
-// =================================================================
-// X INTEGRATION
-// =================================================================
-const X_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
-const X_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
-const X_REDIRECT_URI = 'https://creatoros-backend.onrender.com/api/integrations/x/callback';
+    if (!code || !state) {
+      return res.status(400).json({ 
+        error: 'Missing parameters',
+        message: 'Authorization code and state are required.' 
+      });
+    }
 
-const xClient = new TwitterApi({
-  clientId: X_CLIENT_ID,
-  clientSecret: X_CLIENT_SECRET,
-});
+    // Verify state token
+    let decoded;
+    try {
+      decoded = jwt.verify(state, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: 'Invalid state',
+        message: 'Invalid or expired state token.' 
+      });
+    }
 
-router.get('/x', authMiddleware, (req, res) => {
-    const token = req.header('x-auth-token') || req.query.token;
-    
-    const { url, codeVerifier } = xClient.generateOAuth2AuthLink(
-        X_REDIRECT_URI,
-        { 
-            scope: ['tweet.read', 'users.read', 'offline.access']
-        }
+    // Exchange code for tokens
+    const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', {
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: process.env.GOOGLE_REDIRECT_URI
+    });
+
+    const { access_token, refresh_token } = tokenResponse.data;
+
+    // Get user profile
+    const profileResponse = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: {
+        'Authorization': `Bearer ${access_token}`
+      }
+    });
+
+    // Update user with Google tokens and profile
+    const user = await User.findByIdAndUpdate(
+      decoded.userId,
+      {
+        'google.accessToken': access_token,
+        'google.refreshToken': refresh_token,
+        'google.profile': {
+          id: profileResponse.data.id,
+          email: profileResponse.data.email,
+          name: profileResponse.data.name,
+          picture: profileResponse.data.picture
+        },
+        'google.connectedAt': new Date()
+      },
+      { new: true }
     );
 
-    // Create a new JWT that includes the original user token AND the codeVerifier
-    const statePayload = {
-        jwt: token,
-        codeVerifier: codeVerifier
-    };
-    const stateToken = jwt.sign(statePayload, JWT_SECRET);
+    if (!user) {
+      return res.status(404).json({ 
+        error: 'User not found',
+        message: 'User account not found.' 
+      });
+    }
 
-    // Append our new composite state token to the URL
-    const finalUrl = `${url}&state=${stateToken}`;
+    res.json({
+      success: true,
+      message: 'Google account connected successfully',
+      platform: 'google',
+      profile: {
+        name: profileResponse.data.name,
+        email: profileResponse.data.email,
+        picture: profileResponse.data.picture
+      }
+    });
 
-    res.redirect(finalUrl);
+  } catch (error) {
+    console.error('Google OAuth callback error:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Failed to complete Google authentication.' 
+    });
+  }
 });
 
-router.get('/x/callback', async (req, res) => {
-    try {
-        const { state, code } = req.query;
+// X (Twitter) OAuth initiation
+router.get('/x', auth, (req, res) => {
+  try {
+    // Generate code verifier and challenge for PKCE
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-        if (!state || !code) {
-            return res.status(400).send('You denied the app or the state/code is missing!');
-        }
-        
-        // Decode the composite state token to get the original JWT and the codeVerifier
-        const decodedState = jwt.verify(state, JWT_SECRET);
-        const { jwt: userToken, codeVerifier } = decodedState;
+    // Create state token with user ID and code verifier
+    const state = jwt.sign(
+      { 
+        userId: req.user._id, 
+        platform: 'x',
+        codeVerifier 
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' }
+    );
 
-        if (!codeVerifier) {
-             return res.status(400).send('Invalid state: codeVerifier is missing.');
-        }
+    const xAuthUrl = 'https://twitter.com/i/oauth2/authorize?' +
+      `response_type=code&` +
+      `client_id=${process.env.X_CLIENT_ID}&` +
+      'redirect_uri=' + encodeURIComponent(process.env.X_REDIRECT_URI) + '&' +
+      'scope=' + encodeURIComponent('tweet.read users.read follows.read offline.access') + '&' +
+      `state=${state}&` +
+      `code_challenge=${codeChallenge}&` +
+      'code_challenge_method=S256';
 
-        // Verify the original user JWT to get the user ID
-        const decodedUser = jwt.verify(userToken, JWT_SECRET);
-        const userId = decodedUser.user.id;
-        
-        const { accessToken, refreshToken, expiresIn } = await xClient.loginWithOAuth2({
-            code,
-            codeVerifier,
-            redirectUri: X_REDIRECT_URI,
-        });
+    res.json({
+      success: true,
+      authUrl: xAuthUrl
+    });
 
-        const expiryDate = Date.now() + (expiresIn * 1000);
+  } catch (error) {
+    console.error('X OAuth initiation error:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Failed to initiate X authentication.' 
+    });
+  }
+});
 
-        await User.findByIdAndUpdate(userId, {
-            'x.accessToken': accessToken,
-            'x.refreshToken': refreshToken,
-            'x.expiryDate': expiryDate,
-        });
-        
-        res.redirect('https://creatoros-frontend.vercel.app/app/dashboard');
+// X (Twitter) OAuth callback
+router.post('/x/callback', async (req, res) => {
+  try {
+    const { code, state } = req.body;
 
-    } catch (err) {
-        console.error('Error during X OAuth callback:', err);
-        res.status(500).send('Server Error');
+    if (!code || !state) {
+      return res.status(400).json({ 
+        error: 'Missing parameters',
+        message: 'Authorization code and state are required.' 
+      });
     }
+
+    // Verify state token and extract code verifier
+    let decoded;
+    try {
+      decoded = jwt.verify(state, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: 'Invalid state',
+        message: 'Invalid or expired state token.' 
+      });
+    }
+
+    // Exchange code for tokens using PKCE
+    const tokenResponse = await axios.post('https://api.twitter.com/2/oauth2/token', 
+      new URLSearchParams({
+        code,
+        grant_type: 'authorization_code',
+        client_id: process.env.X_CLIENT_ID,
+        redirect_uri: process.env.X_REDIRECT_URI,
+        code_verifier: decoded.codeVerifier
+      }), 
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Basic ${Buffer.from(`${process.env.X_CLIENT_ID}:${process.env.X_CLIENT_SECRET}`).toString('base64')}`
+        }
+      }
+    );
+
+    const { access_token, refresh_token } = tokenResponse.data;
+
+    // Get user profile
+    const profileResponse = await axios.get('https://api.twitter.com/2/users/me?user.fields=profile_image_url,public_metrics', {
+      headers: {
+        'Authorization': `Bearer ${access_token}`
+      }
+    });
+
+    const profile = profileResponse.data.data;
+
+    // Update user with X tokens and profile
+    const user = await User.findByIdAndUpdate(
+      decoded.userId,
+      {
+        'x.accessToken': access_token,
+        'x.refreshToken': refresh_token,
+        'x.profile': {
+          id: profile.id,
+          username: profile.username,
+          name: profile.name,
+          profileImage: profile.profile_image_url
+        },
+        'x.connectedAt': new Date()
+      },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ 
+        error: 'User not found',
+        message: 'User account not found.' 
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'X account connected successfully',
+      platform: 'x',
+      profile: {
+        username: profile.username,
+        name: profile.name,
+        profileImage: profile.profile_image_url
+      }
+    });
+
+  } catch (error) {
+    console.error('X OAuth callback error:', error);
+    res.status(500).json({ 
+      error: 'Server error',
+      message: 'Failed to complete X authentication.' 
+    });
+  }
 });
 
 module.exports = router;

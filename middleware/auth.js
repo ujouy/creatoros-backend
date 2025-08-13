@@ -1,31 +1,57 @@
-// creatoros-backend/middleware/auth.js
-
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
-const JWT_SECRET = 'your_super_secret_string_12345';
-
-module.exports = function(req, res, next) {
-  // --- MODIFIED SECTION ---
-  // Try to get token from the header first
-  let token = req.header('x-auth-token');
-
-  // If no token in header, check the query parameters as a fallback
-  if (!token && req.query.token) {
-    token = req.query.token;
-  }
-  // ------------------------
-
-  // Check if no token found in either place
-  if (!token) {
-    return res.status(401).json({ msg: 'No token, authorization denied' });
-  }
-
-  // Verify token
+const auth = async (req, res, next) => {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded.user;
+    // Get token from header
+    const token = req.header('x-auth-token');
+    
+    if (!token) {
+      return res.status(401).json({ 
+        error: 'No token provided', 
+        message: 'Access denied. Please provide a valid authentication token.' 
+      });
+    }
+
+    // Verify token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // Find user
+    const user = await User.findById(decoded.userId).select('-password');
+    
+    if (!user) {
+      return res.status(401).json({ 
+        error: 'Invalid token', 
+        message: 'User not found. Please log in again.' 
+      });
+    }
+
+    // Add user to request object
+    req.user = user;
     next();
-  } catch (err) {
-    res.status(401).json({ msg: 'Token is not valid' });
+    
+  } catch (error) {
+    console.error('Auth middleware error:', error);
+    
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ 
+        error: 'Invalid token', 
+        message: 'Please provide a valid authentication token.' 
+      });
+    }
+    
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ 
+        error: 'Token expired', 
+        message: 'Your session has expired. Please log in again.' 
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Server error', 
+      message: 'Authentication failed due to server error.' 
+    });
   }
 };
+
+module.exports = auth;
