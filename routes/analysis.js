@@ -11,8 +11,8 @@ const User = require('../models/User');
 // --- CONFIGURATION ---
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const TWITTER_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
-const TWITTER_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
+const X_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
+const X_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // --- ROUTE: Generate a User's Roadmap ---
@@ -25,7 +25,7 @@ router.get('/generate-roadmap', authMiddleware, async (req, res) => {
 
     let promptData = {
         youtube: null,
-        twitter: null,
+        x: null,
     };
 
     // 1. Fetch YouTube Data if connected
@@ -37,11 +37,11 @@ router.get('/generate-roadmap', authMiddleware, async (req, res) => {
         promptData.youtube = channelInfo.data.items[0];
     }
 
-    // 2. Fetch Twitter Data if connected
-    if (user.twitter && user.twitter.accessToken) {
-        const twitterClient = new TwitterApi(user.twitter.accessToken);
-        const twitterUser = await twitterClient.v2.me({ 'user.fields': ['public_metrics', 'description'] });
-        promptData.twitter = twitterUser.data;
+    // 2. Fetch X Data if connected
+    if (user.x && user.x.accessToken) {
+        const xClient = new TwitterApi(user.x.accessToken);
+        const xUser = await xClient.v2.me({ 'user.fields': ['public_metrics', 'description'] });
+        promptData.x = xUser.data;
     }
 
     // 3. Construct a powerful prompt for the Gemini API
@@ -57,13 +57,13 @@ router.get('/generate-roadmap', authMiddleware, async (req, res) => {
       - Total Views: ${promptData.youtube.statistics.viewCount}
       ` : '- Not Connected'}
 
-      **X / Twitter Data:**
-      ${promptData.twitter ? `
-      - Handle: @${promptData.twitter.username}
-      - Bio: "${promptData.twitter.description}"
-      - Followers: ${promptData.twitter.public_metrics.followers_count}
-      - Following: ${prompt_data.twitter.public_metrics.following_count}
-      - Tweet Count: ${promptData.twitter.public_metrics.tweet_count}
+      **X Data:**
+      ${promptData.x ? `
+      - Handle: @${promptData.x.username}
+      - Bio: "${promptData.x.description}"
+      - Followers: ${promptData.x.public_metrics.followers_count}
+      - Following: ${promptData.x.public_metrics.following_count}
+      - Tweet Count: ${promptData.x.public_metrics.tweet_count}
       ` : '- Not Connected'}
 
       **Your Task:**

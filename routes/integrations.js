@@ -8,7 +8,6 @@ const jwt = require('jsonwebtoken');
 const authMiddleware = require('../middleware/auth');
 const User = require('../models/User');
 
-// --- SHARED CONFIGURATION ---
 const JWT_SECRET = process.env.JWT_SECRET || 'your_super_secret_string_12345';
 
 // =================================================================
@@ -54,73 +53,80 @@ router.get('/google/callback', async (req, res) => {
   }
 });
 
-// =================================================================
-// X / TWITTER INTEGRATION
-// =================================================================
-const TWITTER_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
-const TWITTER_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
-const TWITTER_REDIRECT_URI = 'https://creatoros-backend.onrender.com/api/integrations/twitter/callback';
 
-const twitterClient = new TwitterApi({
-  clientId: TWITTER_CLIENT_ID,
-  clientSecret: TWITTER_CLIENT_SECRET,
+// =================================================================
+// X INTEGRATION
+// =================================================================
+const X_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
+const X_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
+const X_REDIRECT_URI = 'https://creatoros-backend.onrender.com/api/integrations/x/callback';
+
+const xClient = new TwitterApi({
+  clientId: X_CLIENT_ID,
+  clientSecret: X_CLIENT_SECRET,
 });
 
-router.get('/twitter', authMiddleware, (req, res) => {
+router.get('/x', authMiddleware, (req, res) => {
     const token = req.header('x-auth-token') || req.query.token;
-    const { url, codeVerifier, state } = twitterClient.generateOAuth2AuthLink(
-        TWITTER_REDIRECT_URI,
+    
+    const { url, codeVerifier } = xClient.generateOAuth2AuthLink(
+        X_REDIRECT_URI,
         { 
-            scope: ['tweet.read', 'users.read', 'offline.access'],
-            state: token // Pass our JWT in the state
+            scope: ['tweet.read', 'users.read', 'offline.access']
         }
     );
-    // We need to temporarily store the codeVerifier to use in the callback
-    // In a real app, you'd store this in the user's session or a temporary DB entry
-    // For simplicity, we'll just log it for now. A more robust solution is needed for production.
-    console.log(`Twitter codeVerifier for user: ${codeVerifier}`);
-    // A robust solution would be to save this verifier associated with the user state
-    // For now, this example will need a way to retrieve this in the callback.
-    // A temporary solution could be to pass it in the state, but that's not ideal.
-    // Let's use a simple in-memory store for this example.
-    req.app.locals[state] = codeVerifier;
 
-    res.redirect(url);
+    // Create a new JWT that includes the original user token AND the codeVerifier
+    const statePayload = {
+        jwt: token,
+        codeVerifier: codeVerifier
+    };
+    const stateToken = jwt.sign(statePayload, JWT_SECRET);
+
+    // Append our new composite state token to the URL
+    const finalUrl = `${url}&state=${stateToken}`;
+
+    res.redirect(finalUrl);
 });
 
-router.get('/twitter/callback', async (req, res) => {
+router.get('/x/callback', async (req, res) => {
     try {
         const { state, code } = req.query;
-        const codeVerifier = req.app.locals[state];
 
-        if (!state || !code || !codeVerifier) {
-            return res.status(400).send('You denied the app or your session expired!');
+        if (!state || !code) {
+            return res.status(400).send('You denied the app or the state/code is missing!');
         }
         
-        const decoded = jwt.verify(state, JWT_SECRET);
-        const userId = decoded.user.id;
+        // Decode the composite state token to get the original JWT and the codeVerifier
+        const decodedState = jwt.verify(state, JWT_SECRET);
+        const { jwt: userToken, codeVerifier } = decodedState;
+
+        if (!codeVerifier) {
+             return res.status(400).send('Invalid state: codeVerifier is missing.');
+        }
+
+        // Verify the original user JWT to get the user ID
+        const decodedUser = jwt.verify(userToken, JWT_SECRET);
+        const userId = decodedUser.user.id;
         
-        const { client: loggedClient, accessToken, refreshToken, expiresIn } = await twitterClient.loginWithOAuth2({
+        const { accessToken, refreshToken, expiresIn } = await xClient.loginWithOAuth2({
             code,
             codeVerifier,
-            redirectUri: TWITTER_REDIRECT_URI,
+            redirectUri: X_REDIRECT_URI,
         });
 
         const expiryDate = Date.now() + (expiresIn * 1000);
 
         await User.findByIdAndUpdate(userId, {
-            'twitter.accessToken': accessToken,
-            'twitter.refreshToken': refreshToken,
-            'twitter.expiryDate': expiryDate,
+            'x.accessToken': accessToken,
+            'x.refreshToken': refreshToken,
+            'x.expiryDate': expiryDate,
         });
         
-        // Clean up the temporary store
-        delete req.app.locals[state];
-
         res.redirect('https://creatoros-frontend.vercel.app/app/dashboard');
 
     } catch (err) {
-        console.error('Error during Twitter OAuth callback:', err);
+        console.error('Error during X OAuth callback:', err);
         res.status(500).send('Server Error');
     }
 });

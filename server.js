@@ -5,22 +5,16 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
-// Use the PORT environment variable from Render, or 3000 for local development
 const port = process.env.PORT || 3000;
 
-// --- MIDDLEWARE ---
 app.use(cors());
-// This is needed to parse JSON bodies in POST requests
 app.use(express.json());
-// ------------------
 
-// Use the DATABASE_URL environment variable from Render
 const dbURI = process.env.DATABASE_URL;
 
-// Add a check to ensure the DATABASE_URL is provided
 if (!dbURI) {
   console.error('Error: DATABASE_URL environment variable not set.');
-  process.exit(1); // Exit the process with an error code
+  process.exit(1);
 }
 
 mongoose.connect(dbURI)
@@ -34,7 +28,6 @@ app.get('/', (req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/integrations', require('./routes/integrations'));
 app.use('/api/analysis', require('./routes/analysis'));
-
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
+// --- ADD THIS LINE ---
+app.use('/api/user', require('./routes/user'));
+// ---------------------

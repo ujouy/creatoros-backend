@@ -24,13 +24,12 @@ const userSchema = new Schema({
     refreshToken: String,
     expiryDate: Number
   },
-  // --- ADD THIS NEW SECTION ---
-  twitter: {
+  // Renamed from 'twitter' to 'x'
+  x: {
     accessToken: String,
     refreshToken: String,
     expiryDate: Number
   },
-  // --------------------------
   createdAt: {
     type: Date,
     default: Date.now
