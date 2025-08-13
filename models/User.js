@@ -1,4 +1,4 @@
-// models/User.js
+// creatoros-backend/models/User.js
 
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
@@ -19,8 +19,13 @@ const userSchema = new Schema({
     enum: ['Essential', 'Pro', 'Lifetime', 'None'],
     default: 'None'
   },
-  // --- ADD THIS NEW SECTION ---
   google: {
+    accessToken: String,
+    refreshToken: String,
+    expiryDate: Number
+  },
+  // --- ADD THIS NEW SECTION ---
+  twitter: {
     accessToken: String,
     refreshToken: String,
     expiryDate: Number
